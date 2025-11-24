@@ -120,8 +120,7 @@ def test_steering(
     }
     model = LlamaWrapper(
         HUGGINGFACE_TOKEN,
-        size=settings.model_size,
-        use_chat=not settings.use_base_model,
+        model_name=settings.model_name,
         override_model_weights_path=settings.override_model_weights_path,
     )
     a_token_id = model.tokenizer.convert_tokens_to_ids("A")
@@ -129,15 +128,15 @@ def test_steering(
     model.set_save_internal_decodings(False)
     test_data = test_datasets[settings.type]
     for layer in layers:
-        name_path = model.model_name_path
+        name_path = model.model_name
         if settings.override_vector_model is not None:
             name_path = settings.override_vector_model
         if settings.override_vector is not None:
             vector = get_steering_vector(settings.behavior, settings.override_vector, name_path, normalized=True)
         else:
             vector = get_steering_vector(settings.behavior, layer, name_path, normalized=True)
-        if settings.model_size != "7b":
-            vector = vector.half()
+        #if settings.model_size != "7b":
+            #vector = vector.half()
         vector = vector.to(model.device)
         for multiplier in multipliers:
             result_save_suffix = settings.make_result_save_suffix(
@@ -190,11 +189,10 @@ if __name__ == "__main__":
     parser.add_argument("--system_prompt", type=str, default=None, choices=["pos", "neg"], required=False)
     parser.add_argument("--override_vector", type=int, default=None)
     parser.add_argument("--override_vector_model", type=str, default=None)
-    parser.add_argument("--use_base_model", action="store_true", default=False)
-    parser.add_argument("--model_size", type=str, choices=["7b", "13b"], default="7b")
+    parser.add_argument("--model_name", type=str)
     parser.add_argument("--override_model_weights_path", type=str, default=None)
     parser.add_argument("--overwrite", action="store_true", default=False)
-    
+
     args = parser.parse_args()
 
     steering_settings = SteeringSettings()
@@ -202,8 +200,7 @@ if __name__ == "__main__":
     steering_settings.system_prompt = args.system_prompt
     steering_settings.override_vector = args.override_vector
     steering_settings.override_vector_model = args.override_vector_model
-    steering_settings.use_base_model = args.use_base_model
-    steering_settings.model_size = args.model_size
+    steering_settings.model_name = args.model_name
     steering_settings.override_model_weights_path = args.override_model_weights_path
 
     for behavior in args.behaviors:

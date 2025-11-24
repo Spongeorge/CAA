@@ -59,30 +59,41 @@ class BlockOutputWrapper(t.nn.Module):
 
     def forward(self, *args, **kwargs):
         output = self.block(*args, **kwargs)
-        self.activations = output[0]
+
+        if isinstance(output, tuple):
+            self.activations = output[0]
+        else:
+            self.activations = output
+
         if self.calc_dot_product_with is not None:
             last_token_activations = self.activations[0, -1, :]
             decoded_activations = self.unembed_matrix(self.norm(last_token_activations))
             top_token_id = t.topk(decoded_activations, 1)[1][0]
             top_token = self.tokenizer.decode(top_token_id)
             dot_product = t.dot(last_token_activations, self.calc_dot_product_with) / (
-                t.norm(last_token_activations) * t.norm(self.calc_dot_product_with)
+                    t.norm(last_token_activations) * t.norm(self.calc_dot_product_with)
             )
             self.dot_products.append((top_token, dot_product.cpu().item()))
+
         if self.add_activations is not None:
             augmented_output = add_vector_from_position(
-                matrix=output[0],
+                matrix=self.activations if not isinstance(output, tuple) else output[0],
                 vector=self.add_activations,
                 position_ids=kwargs["position_ids"],
                 from_pos=self.from_position,
             )
-            output = (augmented_output,) + output[1:]
+
+            if isinstance(output, tuple):
+                output = (augmented_output,) + output[1:]
+            else:
+                output = augmented_output
 
         if not self.save_internal_decodings:
             return output
 
         # Whole block unembedded
-        self.block_output_unembedded = self.unembed_matrix(self.norm(output[0]))
+        self.block_output_unembedded = self.unembed_matrix(
+            self.norm(self.activations if not isinstance(output, tuple) else output[0]))
 
         # Self-attention unembedded
         attn_output = self.block.self_attn.activations
@@ -112,27 +123,26 @@ class BlockOutputWrapper(t.nn.Module):
 
 class LlamaWrapper:
     def __init__(
-        self,
-        hf_token: str,
-        size: str = "7b",
-        use_chat: bool = True,
-        override_model_weights_path: Optional[str] = None,
+            self,
+            hf_token: str,
+            model_name: str = None,
+            override_model_weights_path: Optional[str] = None,
     ):
         self.device = "cuda" if t.cuda.is_available() else "cpu"
-        self.use_chat = use_chat
-        self.model_name_path = get_model_path(size, not use_chat)
+        self.use_chat = True
+        self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name_path, token=hf_token
+            model_name, token=hf_token
         )
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name_path, token=hf_token
+            model_name, token=hf_token
         )
         if override_model_weights_path is not None:
             self.model.load_state_dict(t.load(override_model_weights_path))
-        if size != "7b":
-            self.model = self.model.half()
+        # if size != "7b":
+        # self.model = self.model.half()
         self.model = self.model.to(self.device)
-        if use_chat:
+        if self.use_chat:
             self.END_STR = t.tensor(self.tokenizer.encode(ADD_FROM_POS_CHAT)[1:]).to(
                 self.device
             )
@@ -162,7 +172,8 @@ class LlamaWrapper:
             )
             return self.tokenizer.batch_decode(generated)[0]
 
-    def generate_text(self, user_input: str, model_output: Optional[str] = None, system_prompt: Optional[str] = None, max_new_tokens: int = 50) -> str:
+    def generate_text(self, user_input: str, model_output: Optional[str] = None, system_prompt: Optional[str] = None,
+                      max_new_tokens: int = 50) -> str:
         if self.use_chat:
             tokens = tokenize_llama_chat(
                 tokenizer=self.tokenizer, user_input=user_input, model_output=model_output, system_prompt=system_prompt
@@ -179,7 +190,8 @@ class LlamaWrapper:
             logits = self.model(tokens).logits
             return logits
 
-    def get_logits_from_text(self, user_input: str, model_output: Optional[str] = None, system_prompt: Optional[str] = None) -> t.Tensor:
+    def get_logits_from_text(self, user_input: str, model_output: Optional[str] = None,
+                             system_prompt: Optional[str] = None) -> t.Tensor:
         if self.use_chat:
             tokens = tokenize_llama_chat(
                 tokenizer=self.tokenizer, user_input=user_input, model_output=model_output, system_prompt=system_prompt
@@ -210,13 +222,13 @@ class LlamaWrapper:
         print(label, data)
 
     def decode_all_layers(
-        self,
-        tokens,
-        topk=10,
-        print_attn_mech=True,
-        print_intermediate_res=True,
-        print_mlp=True,
-        print_block=True,
+            self,
+            tokens,
+            topk=10,
+            print_attn_mech=True,
+            print_intermediate_res=True,
+            print_mlp=True,
+            print_block=True,
     ):
         tokens = tokens.to(self.device)
         self.get_logits(tokens)

@@ -30,7 +30,7 @@ def add_vector_from_position(matrix, vector, position_ids, from_pos=None):
     mask = position_ids >= from_id
     mask = mask.unsqueeze(-1)
 
-    matrix += mask.float() * vector
+    matrix += (mask.float() * vector).squeeze()
     return matrix
 
 

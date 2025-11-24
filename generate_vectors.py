@@ -42,11 +42,9 @@ class ComparisonDataset(Dataset):
 
     def prompt_to_tokens(self, instruction, model_output):
         if self.use_chat:
-            tokens = tokenize_llama_chat(
-                self.tokenizer,
-                user_input=instruction,
-                model_output=model_output,
-            )
+            messages = [{"role": "user", "content": instruction},
+            {"role": "assistant", "content": model_output}]
+            tokens = self.tokenizer.apply_chat_template(messages)
         else:
             tokens = tokenize_llama_base(
                 self.tokenizer,
@@ -88,24 +86,28 @@ def generate_save_vectors_for_behavior(
     dataset = ComparisonDataset(
         data_path,
         HUGGINGFACE_TOKEN,
-        model.model_name_path,
+        model.model_name,
         model.use_chat,
     )
 
-    for p_tokens, n_tokens in tqdm(dataset, desc="Processing prompts"):
+
+
+    for i, (p_tokens, n_tokens) in enumerate(tqdm(dataset, desc="Processing prompts")):
         p_tokens = p_tokens.to(model.device)
         n_tokens = n_tokens.to(model.device)
+
         model.reset_all()
         model.get_logits(p_tokens)
         for layer in layers:
             p_activations = model.get_last_activations(layer)
-            p_activations = p_activations[0, -2, :].detach().cpu()
+            p_activations = p_activations[0, -2, :].detach().cpu().clone()
             pos_activations[layer].append(p_activations)
         model.reset_all()
         model.get_logits(n_tokens)
+
         for layer in layers:
             n_activations = model.get_last_activations(layer)
-            n_activations = n_activations[0, -2, :].detach().cpu()
+            n_activations = n_activations[0, -2, :].detach().cpu().clone()
             neg_activations[layer].append(n_activations)
 
     for layer in layers:
@@ -114,23 +116,22 @@ def generate_save_vectors_for_behavior(
         vec = (all_pos_layer - all_neg_layer).mean(dim=0)
         t.save(
             vec,
-            get_vector_path(behavior, layer, model.model_name_path),
+            get_vector_path(behavior, layer, model.model_name),
         )
         if save_activations:
             t.save(
                 all_pos_layer,
-                get_activations_path(behavior, layer, model.model_name_path, "pos"),
+                get_activations_path(behavior, layer, model.model_name, "pos"),
             )
             t.save(
                 all_neg_layer,
-                get_activations_path(behavior, layer, model.model_name_path, "neg"),
+                get_activations_path(behavior, layer, model.model_name, "neg"),
             )
 
 def generate_save_vectors(
     layers: List[int],
     save_activations: bool,
-    use_base_model: bool,
-    model_size: str,
+    model_name: str,
     behaviors: List[str],
 ):
     """
@@ -141,7 +142,7 @@ def generate_save_vectors(
     behaviors: behaviors to generate vectors for
     """
     model = LlamaWrapper(
-        HUGGINGFACE_TOKEN, size=model_size, use_chat=not use_base_model
+        HUGGINGFACE_TOKEN, model_name=model_name
     )
     for behavior in behaviors:
         generate_save_vectors_for_behavior(
@@ -153,15 +154,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--layers", nargs="+", type=int, default=list(range(32)))
     parser.add_argument("--save_activations", action="store_true", default=False)
-    parser.add_argument("--use_base_model", action="store_true", default=False)
-    parser.add_argument("--model_size", type=str, choices=["7b", "13b"], default="7b")
+    parser.add_argument("--model_name", type=str)
     parser.add_argument("--behaviors", nargs="+", type=str, default=ALL_BEHAVIORS)
 
     args = parser.parse_args()
     generate_save_vectors(
         args.layers,
         args.save_activations,
-        args.use_base_model,
-        args.model_size,
+        args.model_name,
         args.behaviors
     )
