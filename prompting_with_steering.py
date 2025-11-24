@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import argparse
 from typing import List, Dict, Optional
 from tqdm import tqdm
+import numpy as np
 from utils.helpers import get_a_b_probs
 from utils.tokenize import E_INST
 from steering_settings import SteeringSettings
@@ -169,6 +170,124 @@ def test_steering(
             ) as f:
                 json.dump(results, f, indent=4)
 
+def test_steering_ts(
+    layers: List[int],
+    multiplier: float,
+    settings: SteeringSettings,
+    overwrite=False,
+    reward_fn=None,
+):
+    """
+    Thompson-sampling based layer selection:
+    - Runs through test_data once.
+    - For each example, chooses a layer via Thompson sampling.
+    - reward_fn(result) must return a numeric reward in [0,1].
+    """
+
+    save_results_dir = get_results_dir(settings.behavior)
+    if not os.path.exists(save_results_dir):
+        os.makedirs(save_results_dir)
+
+    process_methods = {
+        "ab": process_item_ab,
+        "open_ended": process_item_open_ended,
+        "truthful_qa": process_item_tqa_mmlu,
+        "mmlu": process_item_tqa_mmlu,
+    }
+
+    test_datasets = {
+        "ab": get_ab_test_data(settings.behavior),
+        "open_ended": get_open_ended_test_data(settings.behavior),
+        "truthful_qa": get_truthful_qa_data(),
+        "mmlu": get_mmlu_data(),
+    }
+
+    test_data = test_datasets[settings.type]
+
+    model = LlamaWrapper(
+        HUGGINGFACE_TOKEN,
+        model_name=settings.model_name,
+        override_model_weights_path=settings.override_model_weights_path,
+    )
+
+    a_token_id = model.tokenizer.convert_tokens_to_ids("A")
+    b_token_id = model.tokenizer.convert_tokens_to_ids("B")
+    model.set_save_internal_decodings(False)
+
+    # Bandit parameters
+    num_layers = len(layers)
+    alpha = np.ones(num_layers)
+    beta_val = np.ones(num_layers)
+
+    results = []
+
+    # iterate through dataset ONCE
+    for item in tqdm(test_data, desc="TS steering loop"):
+
+        # Thompson sampling: draw a parameter for each layer
+        theta = np.random.beta(alpha, beta_val)
+        idx = np.argmax(theta)
+        chosen_layer = layers[idx]
+
+        # load steering vector for chosen_layer
+        name_path = settings.override_vector_model or model.model_name
+        if settings.override_vector is not None:
+            vector = get_steering_vector(
+                settings.behavior, settings.override_vector, name_path, normalized=True
+            )
+        else:
+            vector = get_steering_vector(
+                settings.behavior, chosen_layer, name_path, normalized=True
+            )
+        vector = vector.to(model.device)
+
+        # Run one evaluation on the item using the chosen layer
+        model.reset_all()
+        model.set_add_activations(chosen_layer, multiplier * vector)
+
+        result = process_methods[settings.type](
+            item=item,
+            model=model,
+            system_prompt=get_system_prompt(settings.behavior, settings.system_prompt),
+            a_token_id=a_token_id,
+            b_token_id=b_token_id,
+        )
+
+        # Convert result to scalar reward
+        r = reward_fn(result)
+        assert 0 <= r <= 1
+
+        # Update posterior parameters
+        alpha[idx] += r
+        beta_val[idx] += (1 - r)
+
+        # Save result with layer choice
+        results.append({
+            "item_id": getattr(item, "id", None),
+            "chosen_layer": int(chosen_layer),
+            "reward": float(r),
+            "result": result,
+        })
+
+    # save summary + posteriors
+    summary = {
+        "layers": layers,
+        "alpha": alpha.tolist(),
+        "beta": beta_val.tolist(),
+        "posterior_means": (alpha / (alpha + beta_val)).tolist(),
+    }
+
+    save_filename = os.path.join(
+        save_results_dir,
+        f"ts_results_{settings.behavior}_{settings.type}.json",
+    )
+
+    with open(save_filename, "w") as f:
+        json.dump({"results": results, "summary": summary}, f, indent=4)
+
+    print("Saved:", save_filename)
+    return summary
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -192,6 +311,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str)
     parser.add_argument("--override_model_weights_path", type=str, default=None)
     parser.add_argument("--overwrite", action="store_true", default=False)
+    parser.add_argument("--ts", type=bool, default=False)
 
     args = parser.parse_args()
 
@@ -205,9 +325,17 @@ if __name__ == "__main__":
 
     for behavior in args.behaviors:
         steering_settings.behavior = behavior
-        test_steering(
-            layers=args.layers,
-            multipliers=args.multipliers,
-            settings=steering_settings,
-            overwrite=args.overwrite,
-        )
+        if not args.ts:
+            test_steering(
+                layers=args.layers,
+                multipliers=args.multipliers,
+                settings=steering_settings,
+                overwrite=args.overwrite,
+            )
+        else:
+            test_steering_ts(
+                layers=args.layers,
+                multipliers=args.multipliers,
+                settings=steering_settings,
+                overwrite=args.overwrite,
+            )
